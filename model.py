@@ -1,258 +1,220 @@
+"""
+Machine learning model helpers for traffic prediction.
+
+The module provides time and lag feature engineering transformers plus small
+helpers for training, prediction, and evaluation.
+"""
+
+import numpy as np
+import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 
-  """
-   model.py
-  Machine Learning model for traffic prediction.
-  Implements a pipeline with feature engineering and prediction capabilities.
-  """
+class TimeFeatureEngineer(BaseEstimator, TransformerMixin):
+    """Create time-based features from a ``timestamp`` column."""
 
-  import pandas as pd
-  import numpy as np
-  from sklearn.base import BaseEstimator, TransformerMixin
-  from sklearn.pipeline import Pipeline
-  from sklearn.preprocessing import StandardScaler
-  from sklearn.ensemble import RandomForestRegressor
-  from sklearn.metrics import mean_absolute_error, mean_squared_error
-  import warnings
-  warnings.filterwarnings('ignore')
+    def fit(self, X, y=None):
+        return self
 
+    def transform(self, X):
+        """
+        Transform input data by adding time-based features.
 
-  class TimeFeatureEngineer(BaseEstimator, TransformerMixin):
-      """
-      Custom transformer to create time-based features from timestamps.
-      """
+        Args:
+            X (pd.DataFrame): Input data with a ``timestamp`` column.
 
-      def __init__(self):
-          pass
+        Returns:
+            pd.DataFrame: Data with additional time features.
+        """
+        X = X.copy()
 
-      def fit(self, X, y=None):
-          return self
+        if not pd.api.types.is_datetime64_any_dtype(X["timestamp"]):
+            X["timestamp"] = pd.to_datetime(X["timestamp"])
 
-      def transform(self, X):
-          """
-          Transform input data by adding time-based features.
+        X["hour"] = X["timestamp"].dt.hour
+        X["day_of_week"] = X["timestamp"].dt.dayofweek
+        X["is_weekend"] = (X["day_of_week"] >= 5).astype(int)
+        X["hour_sin"] = np.sin(2 * np.pi * X["hour"] / 24)
+        X["hour_cos"] = np.cos(2 * np.pi * X["hour"] / 24)
+        X["day_of_week_sin"] = np.sin(2 * np.pi * X["day_of_week"] / 7)
+        X["day_of_week_cos"] = np.cos(2 * np.pi * X["day_of_week"] / 7)
 
-          Args:
-              X (pd.DataFrame): Input data with 'timestamp' column
-
-          Returns:
-              pd.DataFrame: Data with additional time features
-          """
-          # Ensure we're working with a copy
-          X = X.copy()
-
-          # Convert timestamp to datetime if it isn't already
-          if not pd.api.types.is_datetime64_any_dtype(X['timestamp']):
-              X['timestamp'] = pd.to_datetime(X['timestamp'])
-
-          # Extract time-based features
-          X['hour'] = X['timestamp'].dt.hour
-          X['day_of_week'] = X['timestamp'].dt.dayofweek  # Monday=0, Sunday=6
-          X['is_weekend'] = (X['day_of_week'] >= 5).astype(int)
-
-          # Cyclical encoding for hour and day of week
-          X['hour_sin'] = np.sin(2 * np.pi * X['hour'] / 24)
-          X['hour_cos'] = np.cos(2 * np.pi * X['hour'] / 24)
-          X['day_of_week_sin'] = np.sin(2 * np.pi * X['day_of_week'] / 7)
-          X['day_of_week_cos'] = np.cos(2 * np.pi * X['day_of_week'] / 7)
-
-          return X
+        return X
 
 
-  class LagFeatureEngineer(BaseEstimator, TransformerMixin):
-      """
-      Custom transformer to create lag features for time series data.
-      """
+class LagFeatureEngineer(BaseEstimator, TransformerMixin):
+    """Create lag features for time series data."""
 
-      def __init__(self, lag_columns=None, lag_hours=[1, 24]):
-          """
-          Initialize the LagFeatureEngineer.
+    def __init__(self, lag_columns=None, lag_hours=None):
+        """
+        Initialize the LagFeatureEngineer.
 
-          Args:
-              lag_columns (list): Columns to create lag features for.
-                                 If None, uses ['congestion_score',
-  'travel_time_mins']
-              lag_hours (list): List of hours to lag (e.g., [1, 24] for 1 hour
-  and 24 hours ago)
-          """
-          self.lag_columns = lag_columns or ['congestion_score',
-  'travel_time_mins']
-          self.lag_hours = lag_hours
+        Args:
+            lag_columns (list): Columns to create lag features for. Defaults to
+                ``["congestion_score", "travel_time_mins"]``.
+            lag_hours (list): List of hour offsets to lag. Defaults to
+                ``[1, 24]``.
+        """
+        self.lag_columns = lag_columns
+        self.lag_hours = lag_hours
 
-      def fit(self, X, y=None):
-          return self
+    def fit(self, X, y=None):
+        return self
 
-      def transform(self, X):
-          """
-          Transform input data by adding lag features.
+    def transform(self, X):
+        """
+        Transform input data by adding lag features.
 
-          Args:
-              X (pd.DataFrame): Input data sorted by timestamp
+        Args:
+            X (pd.DataFrame): Input data sorted by timestamp.
 
-          Returns:
-              pd.DataFrame: Data with additional lag features
-          """
-          # Ensure we're working with a copy
-          X = X.copy()
+        Returns:
+            pd.DataFrame: Data with additional lag features.
+        """
+        X = X.copy()
 
-          # Ensure data is sorted by timestamp
-          if 'timestamp' in X.columns:
-              X = X.sort_values('timestamp').reset_index(drop=True)
+        if "timestamp" in X.columns:
+            X = X.sort_values("timestamp").reset_index(drop=True)
 
-          # Create lag features for each specified column
-          for col in self.lag_columns:
-              if col in X.columns:
-                  for lag in self.lag_hours:
-                      X[f'{col}_lag_{lag}'] = X[col].shift(lag)
+        lag_columns = self.lag_columns or ["congestion_score", "travel_time_mins"]
+        lag_hours = self.lag_hours or [1, 24]
 
-          return X
+        for col in lag_columns:
+            if col in X.columns:
+                for lag in lag_hours:
+                    X[f"{col}_lag_{lag}"] = X[col].shift(lag)
+
+        return X
 
 
-  def create_feature_engineering_pipeline():
-      """
-      Create a pipeline for feature engineering only (time and lag features).
+class NumericFeatureSelector(BaseEstimator, TransformerMixin):
+    """Drop non-feature columns and keep numeric model inputs."""
 
-      Returns:
-          sklearn.pipeline.Pipeline: Feature engineering pipeline
-      """
-      return Pipeline(steps=[
-          ('time_features', TimeFeatureEngineer()),
-          ('lag_features', LagFeatureEngineer())
-      ])
+    def __init__(self, drop_columns=None):
+        self.drop_columns = drop_columns or []
 
+    def fit(self, X, y=None):
+        return self
 
-  def create_model_pipeline_from_features(model_type='random_forest'):
-      """
-      Create a machine learning pipeline for traffic prediction from already
-  featured data.
-
-      Args:
-          model_type (str): Type of model to use ('random_forest' or
-  'gradient_boosting')
-
-      Returns:
-          sklearn.pipeline.Pipeline: Configured machine learning pipeline
-  (scaler + model)
-      """
-      # Define the model
-      if model_type == 'random_forest':
-          model = RandomForestRegressor(
-              n_estimators=100,
-              max_depth=10,
-              min_samples_split=5,
-              min_samples_leaf=2,
-              random_state=42,
-              n_jobs=-1
-          )
-      elif model_type == 'gradient_boosting':
-          from sklearn.ensemble import GradientBoostingRegressor
-          model = GradientBoostingRegressor(
-              n_estimators=100,
-              learning_rate=0.1,
-              max_depth=5,
-              random_state=42
-          )
-      else:
-          raise ValueError(f"Unsupported model type: {model_type}")
-
-      # Create the pipeline
-      return Pipeline(steps=[
-          ('scaler', StandardScaler()),
-          ('regressor', model)
-      ])
+    def transform(self, X):
+        X = X.copy()
+        X = X.drop(columns=[col for col in self.drop_columns if col in X], errors="ignore")
+        return X.select_dtypes(include=[np.number])
 
 
-  def create_model_pipeline(model_type='random_forest'):
-      """
-      Create a machine learning pipeline for traffic prediction (includes
-  feature engineering).
-      This function is kept for backward compatibility.
+def _create_regressor(model_type="random_forest"):
+    if model_type == "random_forest":
+        return RandomForestRegressor(
+            n_estimators=100,
+            max_depth=10,
+            min_samples_split=5,
+            min_samples_leaf=2,
+            random_state=42,
+            n_jobs=-1,
+        )
+    if model_type == "gradient_boosting":
+        from sklearn.ensemble import GradientBoostingRegressor
 
-      Args:
-          model_type (str): Type of model to use ('random_forest' or
-  'gradient_boosting')
-
-      Returns:
-          sklearn.pipeline.Pipeline: Configured machine learning pipeline
-      """
-      # Define the preprocessing steps
-      preprocessing_steps = [
-          ('time_features', TimeFeatureEngineer()),
-          ('lag_features', LagFeatureEngineer()),
-      ]
-
-      # Define the model
-      if model_type == 'random_forest':
-          model = RandomForestRegressor(
-              n_estimators=100,
-              max_depth=10,
-              min_samples_split=5,
-              min_samples_leaf=2,
-              random_state=42,
-              n_jobs=-1
-          )
-      elif model_type == 'gradient_boosting':
-          from sklearn.ensemble import GradientBoostingRegressor
-          model = GradientBoostingRegressor(
-              n_estimators=100,
-              learning_rate=0.1,
-              max_depth=5,
-              random_state=42
-          )
-      else:
-          raise ValueError(f"Unsupported model type: {model_type}")
-
-      # Create the pipeline
-      pipeline_steps = preprocessing_steps + [
-          ('scaler', StandardScaler()),
-          ('regressor', model)
-      ]
-
-      return Pipeline(steps=pipeline_steps)
+        return GradientBoostingRegressor(
+            n_estimators=100,
+            learning_rate=0.1,
+            max_depth=5,
+            random_state=42,
+        )
+    raise ValueError(f"Unsupported model type: {model_type}")
 
 
-  def train_model(pipeline, X_train, y_train):
-      """
-      Train the machine learning pipeline.
+def create_feature_engineering_pipeline():
+    """
+    Create a pipeline for feature engineering only.
 
-      Args:
-          pipeline (sklearn.pipeline.Pipeline): Pipeline to train
-          X_train (pd.DataFrame): Training features
-          y_train (pd.Series): Training target
-
-      Returns:
-          sklearn.pipeline.Pipeline: Trained pipeline
-      """
-      # Fit the pipeline
-      pipeline.fit(X_train, y_train)
-      return pipeline
+    Returns:
+        sklearn.pipeline.Pipeline: Time and lag feature engineering pipeline.
+    """
+    return Pipeline(
+        steps=[
+            ("time_features", TimeFeatureEngineer()),
+            ("lag_features", LagFeatureEngineer()),
+        ]
+    )
 
 
-  def predict_model(pipeline, X):
-      """
-      Make predictions using the trained pipeline.
+def create_model_pipeline_from_features(model_type="random_forest"):
+    """
+    Create a machine learning pipeline for already featured numeric data.
 
-      Args:
-          pipeline (sklearn.pipeline.Pipeline): Trained pipeline
-          X (pd.DataFrame): Features for prediction
+    Args:
+        model_type (str): Type of model to use (``random_forest`` or
+            ``gradient_boosting``).
 
-      Returns:
-          np.array: Predicted values
-      """
-      return pipeline.predict(X)
+    Returns:
+        sklearn.pipeline.Pipeline: Configured scaler + model pipeline.
+    """
+    return Pipeline(
+        steps=[
+            ("feature_selector", NumericFeatureSelector()),
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+            ("regressor", _create_regressor(model_type)),
+        ]
+    )
 
 
-  def evaluate_predictions(y_true, y_pred):
-      """
-      Evaluate predictions using MAE and RMSE.
+def create_model_pipeline(model_type="random_forest", target_column="congestion_score"):
+    """
+    Create a machine learning pipeline for raw traffic data.
 
-      Args:
-          y_true (np.array): True values
-          y_pred (np.array): Predicted values
+    The pipeline includes time and lag feature engineering, drops common
+    non-feature columns, then scales features and trains the requested regressor.
+    """
+    return Pipeline(
+        steps=[
+            ("time_features", TimeFeatureEngineer()),
+            ("lag_features", LagFeatureEngineer()),
+            (
+                "feature_selector",
+                NumericFeatureSelector(["timestamp", "location_id", target_column]),
+            ),
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+            ("regressor", _create_regressor(model_type)),
+        ]
+    )
 
-      Returns:
-          dict: Dictionary containing MAE and RMSE
-      """
-      mae = mean_absolute_error(y_true, y_pred)
-      rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-      return {'mae': mae, 'rmse': rmse}
+
+def train_model(pipeline, X_train, y_train):
+    """
+    Train the machine learning pipeline.
+
+    Returns:
+        sklearn.pipeline.Pipeline: Trained pipeline.
+    """
+    pipeline.fit(X_train, y_train)
+    return pipeline
+
+
+def predict_model(pipeline, X):
+    """
+    Make predictions using a trained pipeline.
+
+    Returns:
+        np.ndarray: Predicted values.
+    """
+    return pipeline.predict(X)
+
+
+def evaluate_predictions(y_true, y_pred):
+    """
+    Evaluate predictions using MAE and RMSE.
+
+    Returns:
+        dict: Dictionary containing ``mae`` and ``rmse``.
+    """
+    mae = mean_absolute_error(y_true, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    return {"mae": mae, "rmse": rmse}
