@@ -4,7 +4,9 @@ import pytest
 
 from model import (
     LagFeatureEngineer,
+    NumericFeatureSelector,
     TimeFeatureEngineer,
+    create_model_pipeline,
     create_model_pipeline_from_features,
     evaluate_predictions,
 )

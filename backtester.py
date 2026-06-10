@@ -7,10 +7,12 @@ import numpy as np
 import pandas as pd
 
 from model import (
-    create_feature_engineering_pipeline,
+    create_train_test_feature_sets,
     create_model_pipeline_from_features,
     evaluate_predictions,
     predict_model,
+    select_forecast_features,
+    sort_time_series,
     train_model,
 )
 
@@ -62,10 +64,7 @@ class WalkForwardBacktester:
         Returns:
             Dictionary containing fold results and summary metrics.
         """
-        data = data.copy()
-        if not pd.api.types.is_datetime64_any_dtype(data[timestamp_column]):
-            data[timestamp_column] = pd.to_datetime(data[timestamp_column])
-        data = data.sort_values(timestamp_column).reset_index(drop=True)
+        data = sort_time_series(data, timestamp_column=timestamp_column)
 
         initial_train_hours = self.initial_train_days * 24
         test_hours = self.test_days * 24
@@ -85,19 +84,24 @@ class WalkForwardBacktester:
             logger.info("--- Fold %s ---", fold)
 
             combined_end_idx = end_train_idx + test_hours
-            combined_data = data.iloc[:combined_end_idx].copy()
+            train_data = data.iloc[:end_train_idx].reset_index(drop=True)
+            test_data = data.iloc[end_train_idx:combined_end_idx].reset_index(drop=True)
             logger.info(
-                "Combined data period: %s to %s",
-                combined_data[timestamp_column].iloc[0],
-                combined_data[timestamp_column].iloc[-1],
+                "Train/test data period: %s to %s",
+                train_data[timestamp_column].iloc[0],
+                test_data[timestamp_column].iloc[-1],
             )
 
-            fe_pipeline = create_feature_engineering_pipeline()
-            featured_data = fe_pipeline.fit_transform(combined_data)
-            logger.info("Featured data shape: %s", featured_data.shape)
-
-            train_featured = featured_data.iloc[:end_train_idx]
-            test_featured = featured_data.iloc[end_train_idx:combined_end_idx]
+            train_featured, test_featured = create_train_test_feature_sets(
+                train_data,
+                test_data,
+                timestamp_column=timestamp_column,
+            )
+            logger.info(
+                "Featured train/test shapes: %s / %s",
+                train_featured.shape,
+                test_featured.shape,
+            )
 
             logger.info(
                 "Training period: %s to %s",
@@ -115,15 +119,17 @@ class WalkForwardBacktester:
                 len(test_featured),
             )
 
-            exclude_cols = [timestamp_column]
-            if "location_id" in train_featured.columns:
-                exclude_cols.append("location_id")
-            if target_column in train_featured.columns:
-                exclude_cols.append(target_column)
-
-            X_train = train_featured.drop(columns=exclude_cols)
+            X_train = select_forecast_features(
+                train_featured,
+                target_column=target_column,
+                timestamp_column=timestamp_column,
+            )
             y_train = train_featured[target_column]
-            X_test = test_featured.drop(columns=exclude_cols)
+            X_test = select_forecast_features(
+                test_featured,
+                target_column=target_column,
+                timestamp_column=timestamp_column,
+            )
             y_test = test_featured[target_column]
 
             model_pipeline = create_model_pipeline_from_features(self.model_type)
