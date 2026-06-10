@@ -1,7 +1,6 @@
 """Expanding-window walk-forward backtesting for traffic prediction."""
 
 import logging
-import warnings
 from typing import Dict
 
 import numpy as np
@@ -15,12 +14,16 @@ from model import (
     train_model,
 )
 
-warnings.filterwarnings("ignore")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 
 class WalkForwardBacktester:
-    """Run an expanding-window walk-forward backtest."""
+    """Run expanding-window walk-forward backtests."""
 
     def __init__(
         self,
@@ -28,6 +31,15 @@ class WalkForwardBacktester:
         test_days: int = 7,
         model_type: str = "random_forest",
     ):
+        """
+        Initialize the backtester.
+
+        Args:
+            initial_train_days: Initial training window size in days.
+            test_days: Number of days to predict in each iteration.
+            model_type: Model type to use (``random_forest`` or
+                ``gradient_boosting``).
+        """
         self.initial_train_days = initial_train_days
         self.test_days = test_days
         self.model_type = model_type
@@ -39,37 +51,69 @@ class WalkForwardBacktester:
         target_column: str = "congestion_score",
         timestamp_column: str = "timestamp",
     ) -> Dict:
-        """Run expanding-window walk-forward backtesting."""
-        data = data.sort_values(timestamp_column).reset_index(drop=True)
+        """
+        Run expanding-window walk-forward backtesting.
+
+        Args:
+            data: Complete dataset with timestamp and features.
+            target_column: Name of the target column to predict.
+            timestamp_column: Name of the timestamp column.
+
+        Returns:
+            Dictionary containing fold results and summary metrics.
+        """
+        data = data.copy()
         if not pd.api.types.is_datetime64_any_dtype(data[timestamp_column]):
             data[timestamp_column] = pd.to_datetime(data[timestamp_column])
+        data = data.sort_values(timestamp_column).reset_index(drop=True)
 
         initial_train_hours = self.initial_train_days * 24
         test_hours = self.test_days * 24
-        required_hours = initial_train_hours + test_hours
-        if len(data) < required_hours:
+
+        if len(data) < initial_train_hours + test_hours:
             raise ValueError(
-                f"Not enough data. Need at least {required_hours} hours, "
-                f"but got {len(data)} hours."
+                "Not enough data. Need at least "
+                f"{initial_train_hours + test_hours} hours, but got {len(data)} hours."
             )
 
-        start_idx = 0
         end_train_idx = initial_train_hours
-        fold = 0
         fold_results = []
+        fold = 0
 
         while end_train_idx + test_hours <= len(data):
             fold += 1
             logger.info("--- Fold %s ---", fold)
 
             combined_end_idx = end_train_idx + test_hours
-            combined_data = data.iloc[start_idx:combined_end_idx].copy()
+            combined_data = data.iloc[:combined_end_idx].copy()
+            logger.info(
+                "Combined data period: %s to %s",
+                combined_data[timestamp_column].iloc[0],
+                combined_data[timestamp_column].iloc[-1],
+            )
+
             fe_pipeline = create_feature_engineering_pipeline()
             featured_data = fe_pipeline.fit_transform(combined_data)
+            logger.info("Featured data shape: %s", featured_data.shape)
 
-            train_size = end_train_idx - start_idx
-            train_featured = featured_data.iloc[:train_size]
-            test_featured = featured_data.iloc[train_size : train_size + test_hours]
+            train_featured = featured_data.iloc[:end_train_idx]
+            test_featured = featured_data.iloc[end_train_idx:combined_end_idx]
+
+            logger.info(
+                "Training period: %s to %s",
+                train_featured[timestamp_column].iloc[0],
+                train_featured[timestamp_column].iloc[-1],
+            )
+            logger.info(
+                "Test period: %s to %s",
+                test_featured[timestamp_column].iloc[0],
+                test_featured[timestamp_column].iloc[-1],
+            )
+            logger.info(
+                "Training samples: %s, Test samples: %s",
+                len(train_featured),
+                len(test_featured),
+            )
 
             exclude_cols = [timestamp_column]
             if "location_id" in train_featured.columns:
@@ -85,25 +129,35 @@ class WalkForwardBacktester:
             model_pipeline = create_model_pipeline_from_features(self.model_type)
             trained_pipeline = train_model(model_pipeline, X_train, y_train)
             y_pred = predict_model(trained_pipeline, X_test)
-            metrics = evaluate_predictions(y_test.values, y_pred)
 
-            fold_results.append(
-                {
-                    "fold": fold,
-                    "train_start": train_featured[timestamp_column].iloc[0],
-                    "train_end": train_featured[timestamp_column].iloc[-1],
-                    "test_start": test_featured[timestamp_column].iloc[0],
-                    "test_end": test_featured[timestamp_column].iloc[-1],
-                    "train_size": len(train_featured),
-                    "test_size": len(test_featured),
-                    "mae": metrics["mae"],
-                    "rmse": metrics["rmse"],
-                    "predictions": y_pred,
-                    "actuals": y_test.values,
-                }
+            metrics = evaluate_predictions(y_test.values, y_pred)
+            logger.info(
+                "Fold %s - MAE: %.2f, RMSE: %.2f",
+                fold,
+                metrics["mae"],
+                metrics["rmse"],
             )
+
+            fold_result = {
+                "fold": fold,
+                "train_start": train_featured[timestamp_column].iloc[0],
+                "train_end": train_featured[timestamp_column].iloc[-1],
+                "test_start": test_featured[timestamp_column].iloc[0],
+                "test_end": test_featured[timestamp_column].iloc[-1],
+                "train_size": len(train_featured),
+                "test_size": len(test_featured),
+                "mae": metrics["mae"],
+                "rmse": metrics["rmse"],
+                "predictions": y_pred,
+                "actuals": y_test.values,
+            }
+            fold_results.append(fold_result)
             end_train_idx = combined_end_idx
 
+        self.history = fold_results
+        return self._summarize(fold_results)
+
+    def _summarize(self, fold_results):
         if not fold_results:
             return {
                 "total_folds": 0,
@@ -120,7 +174,7 @@ class WalkForwardBacktester:
 
         mae_values = [result["mae"] for result in fold_results]
         rmse_values = [result["rmse"] for result in fold_results]
-        summary = {
+        return {
             "total_folds": len(fold_results),
             "mae_mean": np.mean(mae_values),
             "mae_std": np.std(mae_values),
@@ -132,14 +186,12 @@ class WalkForwardBacktester:
             "rmse_max": np.max(rmse_values),
             "fold_results": fold_results,
         }
-        self.history = fold_results
-        return summary
 
     def print_summary(self, summary: Dict):
         """Log a formatted summary of backtesting results."""
         logger.info("\n%s", "=" * 60)
         logger.info("WALK-FORWARD BACKTESTING SUMMARY")
-        logger.info("%s", "=" * 60)
+        logger.info("=" * 60)
 
         if summary["total_folds"] == 0:
             logger.info("No backtesting folds completed. Not enough data.")
@@ -151,6 +203,7 @@ class WalkForwardBacktester:
         logger.info("  Std:  %.2f", summary["mae_std"])
         logger.info("  Min:  %.2f", summary["mae_min"])
         logger.info("  Max:  %.2f", summary["mae_max"])
+
         logger.info("\nRMSE (Root Mean Squared Error):")
         logger.info("  Mean: %.2f", summary["rmse_mean"])
         logger.info("  Std:  %.2f", summary["rmse_std"])
@@ -162,13 +215,36 @@ class WalkForwardBacktester:
             last_three_mae = [fold["mae"] for fold in summary["fold_results"][-3:]]
             first_avg = np.mean(first_three_mae)
             last_avg = np.mean(last_three_mae)
-            if last_avg < first_avg:
-                trend = "improving"
-            elif last_avg > first_avg:
-                trend = "degrading"
-            else:
-                trend = "stable"
+            trend = (
+                "improving"
+                if last_avg < first_avg
+                else "degrading"
+                if last_avg > first_avg
+                else "stable"
+            )
             logger.info("\nPerformance trend (first 3 vs last 3 folds): %s", trend)
             logger.info("  First 3 folds avg MAE: %.2f", first_avg)
             logger.info("  Last 3 folds avg MAE:  %.2f", last_avg)
 
+
+def run_backtest_example():
+    """Run a demonstration backtest using generated mock traffic data."""
+    from traffic_client import TrafficAPIClient
+
+    logger.info("Generating mock data for backtesting example...")
+    client = TrafficAPIClient()
+    location = {"lat": 25.4850, "lng": 51.4475}
+    end_time = pd.Timestamp.now()
+    start_time = end_time - pd.Timedelta(days=90)
+
+    data = client.fetch_traffic_data(location, start_time, end_time)
+    logger.info("Generated %s hourly records", len(data))
+
+    backtester = WalkForwardBacktester(
+        initial_train_days=30,
+        test_days=7,
+        model_type="random_forest",
+    )
+    summary = backtester.backtest(data, target_column="congestion_score")
+    backtester.print_summary(summary)
+    return summary
