@@ -1,0 +1,20 @@
+# Python cache files
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# Private environment variables and API keys
+.env
+
+# Generated outputs
+*.csv
+*.log
+
+# Notebook/Colab junk
+.ipynb_checkpoints/
+
+# macOS system file
+.DS_Store
