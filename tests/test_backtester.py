@@ -4,6 +4,7 @@ import pytest
 
 import backtester as backtester_module
 from backtester import WalkForwardBacktester
+from traffic_client import TrafficAPIClient
 
 
 def make_hourly_traffic(hours):
@@ -69,3 +70,44 @@ def test_backtest_rejects_data_shorter_than_train_plus_test_window():
 
     with pytest.raises(ValueError, match="Need at least 48 hours"):
         backtester.backtest(make_hourly_traffic(47))
+
+
+def test_backtest_produces_fold_on_ninety_days_of_hourly_mock_data(monkeypatch):
+    monkeypatch.delenv("TRAFFIC_API_KEY", raising=False)
+    np.random.seed(42)
+
+    def fake_create_model_pipeline_from_features(model_type):
+        return {"model_type": model_type}
+
+    def fake_train_model(pipeline, X_train, y_train):
+        pipeline["mean_target"] = float(y_train.mean())
+        return pipeline
+
+    def fake_predict_model(pipeline, X):
+        return np.full(len(X), pipeline["mean_target"])
+
+    monkeypatch.setattr(
+        backtester_module,
+        "create_model_pipeline_from_features",
+        fake_create_model_pipeline_from_features,
+    )
+    monkeypatch.setattr(backtester_module, "train_model", fake_train_model)
+    monkeypatch.setattr(backtester_module, "predict_model", fake_predict_model)
+
+    start_time = pd.Timestamp("2026-01-01 00:00:00")
+    end_time = start_time + pd.Timedelta(hours=90 * 24 - 1)
+    data = TrafficAPIClient().fetch_traffic_data(
+        {"city": "Doha", "country": "QA"},
+        start_time,
+        end_time,
+    )
+
+    summary = WalkForwardBacktester(
+        initial_train_days=30, test_days=7
+    ).backtest(data)
+
+    assert len(data) == 90 * 24
+    assert summary["total_folds"] >= 1
+    assert len(summary["fold_results"]) == summary["total_folds"]
+    assert all(fold["train_size"] >= 30 * 24 for fold in summary["fold_results"])
+    assert all(fold["test_size"] == 7 * 24 for fold in summary["fold_results"])
