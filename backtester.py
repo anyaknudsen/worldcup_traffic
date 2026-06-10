@@ -137,8 +137,7 @@ class WalkForwardBacktester:
 
     def print_summary(self, summary: Dict):
         """Log a formatted summary of backtesting results."""
-        logger.info("
-%s", "=" * 60)
+        logger.info("\n%s", "=" * 60)
         logger.info("WALK-FORWARD BACKTESTING SUMMARY")
         logger.info("%s", "=" * 60)
 
@@ -147,14 +146,12 @@ class WalkForwardBacktester:
             return
 
         logger.info("Number of folds: %s", summary["total_folds"])
-        logger.info("
-MAE (Mean Absolute Error):")
+        logger.info("\nMAE (Mean Absolute Error):")
         logger.info("  Mean: %.2f", summary["mae_mean"])
         logger.info("  Std:  %.2f", summary["mae_std"])
         logger.info("  Min:  %.2f", summary["mae_min"])
         logger.info("  Max:  %.2f", summary["mae_max"])
-        logger.info("
-RMSE (Root Mean Squared Error):")
+        logger.info("\nRMSE (Root Mean Squared Error):")
         logger.info("  Mean: %.2f", summary["rmse_mean"])
         logger.info("  Std:  %.2f", summary["rmse_std"])
         logger.info("  Min:  %.2f", summary["rmse_min"])
@@ -171,8 +168,7 @@ RMSE (Root Mean Squared Error):")
                 trend = "degrading"
             else:
                 trend = "stable"
-            logger.info("
-Performance trend (first 3 vs last 3 folds): %s", trend)
+            logger.info("\nPerformance trend (first 3 vs last 3 folds): %s", trend)
             logger.info("  First 3 folds avg MAE: %.2f", first_avg)
             logger.info("  Last 3 folds avg MAE:  %.2f", last_avg)
 
