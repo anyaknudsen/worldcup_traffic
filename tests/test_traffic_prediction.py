@@ -100,8 +100,8 @@ def test_simple_train_predict_flow_returns_predictions_and_metrics():
 
 
 def test_backtesting_runs_on_small_synthetic_dataset():
-    data = synthetic_traffic_data(periods=72)
-    backtester = WalkForwardBacktester(initial_train_days=1, test_days=1)
+    data = synthetic_traffic_data(periods=96)
+    backtester = WalkForwardBacktester(initial_train_days=2, test_days=1)
 
     summary = backtester.backtest(data)
 
