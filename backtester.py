@@ -7,9 +7,13 @@ import numpy as np
 import pandas as pd
 
 from model import (
+    DEFAULT_TARGET_COLUMNS,
+    compare_metrics,
     create_feature_engineering_pipeline,
     create_model_pipeline_from_features,
-    evaluate_predictions,
+    evaluate_predictions_by_target,
+    get_feature_importances,
+    predict_naive_last_value,
     predict_model,
     train_model,
 )
@@ -49,6 +53,7 @@ class WalkForwardBacktester:
         self,
         data: pd.DataFrame,
         target_column: str = "congestion_score",
+        target_columns=None,
         timestamp_column: str = "timestamp",
     ) -> Dict:
         """
@@ -57,11 +62,15 @@ class WalkForwardBacktester:
         Args:
             data: Complete dataset with timestamp and features.
             target_column: Name of the target column to predict.
+            target_columns: Optional list of target columns to predict. When
+                provided, this takes precedence over ``target_column``.
             timestamp_column: Name of the timestamp column.
 
         Returns:
             Dictionary containing fold results and summary metrics.
         """
+        target_columns = self._resolve_target_columns(target_column, target_columns)
+
         data = data.copy()
         if not pd.api.types.is_datetime64_any_dtype(data[timestamp_column]):
             data[timestamp_column] = pd.to_datetime(data[timestamp_column])
@@ -118,49 +127,151 @@ class WalkForwardBacktester:
             exclude_cols = [timestamp_column]
             if "location_id" in train_featured.columns:
                 exclude_cols.append("location_id")
-            if target_column in train_featured.columns:
-                exclude_cols.append(target_column)
-
-            X_train = train_featured.drop(columns=exclude_cols)
-            y_train = train_featured[target_column]
-            X_test = test_featured.drop(columns=exclude_cols)
-            y_test = test_featured[target_column]
-
-            model_pipeline = create_model_pipeline_from_features(self.model_type)
-            trained_pipeline = train_model(model_pipeline, X_train, y_train)
-            y_pred = predict_model(trained_pipeline, X_test)
-
-            metrics = evaluate_predictions(y_test.values, y_pred)
-            logger.info(
-                "Fold %s - MAE: %.2f, RMSE: %.2f",
-                fold,
-                metrics["mae"],
-                metrics["rmse"],
+            exclude_cols.extend(
+                [target for target in target_columns if target in train_featured.columns]
             )
 
+            X_train = train_featured.drop(columns=exclude_cols)
+            X_test = test_featured.drop(columns=exclude_cols)
+            y_test = test_featured[target_columns]
+
+            predictions = pd.DataFrame(index=test_featured.index)
+            feature_importances = {}
+
+            for target in target_columns:
+                model_pipeline = create_model_pipeline_from_features(self.model_type)
+                trained_pipeline = train_model(
+                    model_pipeline,
+                    X_train,
+                    train_featured[target],
+                )
+                predictions[target] = np.asarray(
+                    predict_model(trained_pipeline, X_test)
+                )
+                feature_importances[target] = get_feature_importances(
+                    trained_pipeline,
+                    X_train.columns,
+                )
+
+            baseline_predictions = predict_naive_last_value(
+                train_featured[target_columns],
+                y_test,
+            )
+            metrics = evaluate_predictions_by_target(
+                y_test.values,
+                predictions.values,
+                target_columns,
+            )
+            baseline_metrics = evaluate_predictions_by_target(
+                y_test.values,
+                baseline_predictions.values,
+                target_columns,
+            )
+            comparison = compare_metrics(metrics, baseline_metrics)
+
+            logger.info(
+                "Fold %s - %s MAE: %.2f (baseline %.2f), RMSE: %.2f (baseline %.2f)",
+                fold,
+                target_columns[0],
+                metrics[target_columns[0]]["mae"],
+                baseline_metrics[target_columns[0]]["mae"],
+                metrics[target_columns[0]]["rmse"],
+                baseline_metrics[target_columns[0]]["rmse"],
+            )
+
+            primary_target = target_columns[0]
             fold_result = {
                 "fold": fold,
+                "target_columns": target_columns,
                 "train_start": train_featured[timestamp_column].iloc[0],
                 "train_end": train_featured[timestamp_column].iloc[-1],
                 "test_start": test_featured[timestamp_column].iloc[0],
                 "test_end": test_featured[timestamp_column].iloc[-1],
                 "train_size": len(train_featured),
                 "test_size": len(test_featured),
-                "mae": metrics["mae"],
-                "rmse": metrics["rmse"],
-                "predictions": y_pred,
-                "actuals": y_test.values,
+                "metrics": metrics,
+                "baseline_metrics": baseline_metrics,
+                "comparison": comparison,
+                "feature_importances": feature_importances,
+                "mae": metrics[primary_target]["mae"],
+                "rmse": metrics[primary_target]["rmse"],
+                "baseline_mae": baseline_metrics[primary_target]["mae"],
+                "baseline_rmse": baseline_metrics[primary_target]["rmse"],
+                "mae_improvement": comparison[primary_target]["mae"]["improvement"],
+                "rmse_improvement": comparison[primary_target]["rmse"]["improvement"],
+                "predictions": self._format_target_output(predictions, target_columns),
+                "baseline_predictions": self._format_target_output(
+                    baseline_predictions,
+                    target_columns,
+                ),
+                "actuals": self._format_target_output(y_test, target_columns),
             }
             fold_results.append(fold_result)
             end_train_idx = combined_end_idx
 
         self.history = fold_results
-        return self._summarize(fold_results)
+        return self._summarize(fold_results, target_columns)
 
-    def _summarize(self, fold_results):
+    def _resolve_target_columns(self, target_column, target_columns):
+        if target_columns is None:
+            if target_column is None:
+                target_columns = DEFAULT_TARGET_COLUMNS
+            elif isinstance(target_column, (list, tuple)):
+                target_columns = list(target_column)
+            else:
+                target_columns = [target_column]
+        else:
+            target_columns = list(target_columns)
+
+        if not target_columns:
+            raise ValueError("At least one target column is required.")
+        return target_columns
+
+    def _format_target_output(self, values, target_columns):
+        if len(target_columns) == 1:
+            return values[target_columns[0]].values
+        return values.reset_index(drop=True)
+
+    def _summarize_metric_group(self, fold_results, group_name, target_columns):
+        summary = {}
+        for target in target_columns:
+            summary[target] = {}
+            for metric_name in ["mae", "rmse"]:
+                values = [
+                    result[group_name][target][metric_name] for result in fold_results
+                ]
+                summary[target][f"{metric_name}_mean"] = np.mean(values)
+                summary[target][f"{metric_name}_std"] = np.std(values)
+                summary[target][f"{metric_name}_min"] = np.min(values)
+                summary[target][f"{metric_name}_max"] = np.max(values)
+        return summary
+
+    def _summarize_feature_importances(self, fold_results, target_columns):
+        summary = {}
+        for target in target_columns:
+            importances_by_feature = {}
+            for result in fold_results:
+                for item in result["feature_importances"].get(target, []):
+                    importances_by_feature.setdefault(item["feature"], []).append(
+                        item["importance"]
+                    )
+
+            ranked = sorted(
+                (
+                    {"feature": feature, "importance": float(np.mean(values))}
+                    for feature, values in importances_by_feature.items()
+                ),
+                key=lambda item: item["importance"],
+                reverse=True,
+            )
+            summary[target] = ranked[:10]
+        return summary
+
+    def _summarize(self, fold_results, target_columns):
         if not fold_results:
             return {
                 "total_folds": 0,
+                "target_columns": target_columns,
                 "mae_mean": None,
                 "mae_std": None,
                 "mae_min": None,
@@ -169,21 +280,67 @@ class WalkForwardBacktester:
                 "rmse_std": None,
                 "rmse_min": None,
                 "rmse_max": None,
+                "model_metrics": {},
+                "baseline_metrics": {},
+                "comparison": {},
+                "feature_importances": {},
                 "fold_results": [],
             }
 
-        mae_values = [result["mae"] for result in fold_results]
-        rmse_values = [result["rmse"] for result in fold_results]
+        model_metrics = self._summarize_metric_group(
+            fold_results,
+            "metrics",
+            target_columns,
+        )
+        baseline_metrics = self._summarize_metric_group(
+            fold_results,
+            "baseline_metrics",
+            target_columns,
+        )
+        comparison = compare_metrics(
+            {
+                target: {
+                    "mae": model_metrics[target]["mae_mean"],
+                    "rmse": model_metrics[target]["rmse_mean"],
+                }
+                for target in target_columns
+            },
+            {
+                target: {
+                    "mae": baseline_metrics[target]["mae_mean"],
+                    "rmse": baseline_metrics[target]["rmse_mean"],
+                }
+                for target in target_columns
+            },
+        )
+        feature_importances = self._summarize_feature_importances(
+            fold_results,
+            target_columns,
+        )
+        primary_target = target_columns[0]
+        primary_metrics = model_metrics[primary_target]
+        primary_baseline = baseline_metrics[primary_target]
+        primary_comparison = comparison[primary_target]
+
         return {
             "total_folds": len(fold_results),
-            "mae_mean": np.mean(mae_values),
-            "mae_std": np.std(mae_values),
-            "mae_min": np.min(mae_values),
-            "mae_max": np.max(mae_values),
-            "rmse_mean": np.mean(rmse_values),
-            "rmse_std": np.std(rmse_values),
-            "rmse_min": np.min(rmse_values),
-            "rmse_max": np.max(rmse_values),
+            "target_columns": target_columns,
+            "model_metrics": model_metrics,
+            "baseline_metrics": baseline_metrics,
+            "comparison": comparison,
+            "feature_importances": feature_importances,
+            "mae_mean": primary_metrics["mae_mean"],
+            "mae_std": primary_metrics["mae_std"],
+            "mae_min": primary_metrics["mae_min"],
+            "mae_max": primary_metrics["mae_max"],
+            "rmse_mean": primary_metrics["rmse_mean"],
+            "rmse_std": primary_metrics["rmse_std"],
+            "rmse_min": primary_metrics["rmse_min"],
+            "rmse_max": primary_metrics["rmse_max"],
+            "baseline_mae_mean": primary_baseline["mae_mean"],
+            "baseline_rmse_mean": primary_baseline["rmse_mean"],
+            "mae_improvement": primary_comparison["mae"]["improvement"],
+            "rmse_improvement": primary_comparison["rmse"]["improvement"],
             "fold_results": fold_results,
         }
 
@@ -198,17 +355,34 @@ class WalkForwardBacktester:
             return
 
         logger.info("Number of folds: %s", summary["total_folds"])
-        logger.info("\nMAE (Mean Absolute Error):")
-        logger.info("  Mean: %.2f", summary["mae_mean"])
-        logger.info("  Std:  %.2f", summary["mae_std"])
-        logger.info("  Min:  %.2f", summary["mae_min"])
-        logger.info("  Max:  %.2f", summary["mae_max"])
+        for target in summary["target_columns"]:
+            model_metrics = summary["model_metrics"][target]
+            baseline_metrics = summary["baseline_metrics"][target]
+            comparison = summary["comparison"][target]
 
-        logger.info("\nRMSE (Root Mean Squared Error):")
-        logger.info("  Mean: %.2f", summary["rmse_mean"])
-        logger.info("  Std:  %.2f", summary["rmse_std"])
-        logger.info("  Min:  %.2f", summary["rmse_min"])
-        logger.info("  Max:  %.2f", summary["rmse_max"])
+            logger.info("\nTarget: %s", target)
+            logger.info("MAE (Mean Absolute Error):")
+            logger.info("  Model mean:    %.2f", model_metrics["mae_mean"])
+            logger.info("  Baseline mean: %.2f", baseline_metrics["mae_mean"])
+            logger.info(
+                "  Improvement:   %.2f (%.1f%%)",
+                comparison["mae"]["improvement"],
+                comparison["mae"]["improvement_pct"],
+            )
+            logger.info("RMSE (Root Mean Squared Error):")
+            logger.info("  Model mean:    %.2f", model_metrics["rmse_mean"])
+            logger.info("  Baseline mean: %.2f", baseline_metrics["rmse_mean"])
+            logger.info(
+                "  Improvement:   %.2f (%.1f%%)",
+                comparison["rmse"]["improvement"],
+                comparison["rmse"]["improvement_pct"],
+            )
+
+            importances = summary["feature_importances"].get(target, [])
+            if importances:
+                logger.info("Top feature importances:")
+                for item in importances[:5]:
+                    logger.info("  %s: %.3f", item["feature"], item["importance"])
 
         if summary["total_folds"] >= 3:
             first_three_mae = [fold["mae"] for fold in summary["fold_results"][:3]]
@@ -245,6 +419,6 @@ def run_backtest_example():
         test_days=7,
         model_type="random_forest",
     )
-    summary = backtester.backtest(data, target_column="congestion_score")
+    summary = backtester.backtest(data, target_columns=DEFAULT_TARGET_COLUMNS)
     backtester.print_summary(summary)
     return summary

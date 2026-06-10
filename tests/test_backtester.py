@@ -46,6 +46,10 @@ def test_backtest_runs_expanding_windows_and_summarizes_metrics(monkeypatch):
     ).backtest(make_hourly_traffic(72))
 
     assert summary["total_folds"] == 2
+    assert summary["target_columns"] == ["congestion_score"]
+    assert "model_metrics" in summary
+    assert "baseline_metrics" in summary
+    assert "comparison" in summary
     assert summary["mae_mean"] == pytest.approx(
         np.mean([fold["mae"] for fold in summary["fold_results"]])
     )
@@ -59,9 +63,64 @@ def test_backtest_runs_expanding_windows_and_summarizes_metrics(monkeypatch):
     assert first_fold["train_size"] == 24
     assert first_fold["test_size"] == 24
     assert len(first_fold["predictions"]) == 24
+    assert len(first_fold["baseline_predictions"]) == 24
+    assert first_fold["baseline_predictions"][0] == pytest.approx(
+        make_hourly_traffic(72)
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+        .loc[23, "congestion_score"]
+    )
     assert second_fold["train_size"] == 48
     assert second_fold["test_size"] == 24
     assert first_fold["train_start"] < first_fold["train_end"] < first_fold["test_start"]
+
+
+def test_backtest_reports_comparison_for_multiple_targets(monkeypatch):
+    def fake_create_model_pipeline_from_features(model_type):
+        return {"model_type": model_type}
+
+    def fake_train_model(pipeline, X_train, y_train):
+        pipeline["last_target"] = float(y_train.iloc[-1])
+        return pipeline
+
+    def fake_predict_model(pipeline, X):
+        return np.full(len(X), pipeline["last_target"])
+
+    monkeypatch.setattr(
+        backtester_module,
+        "create_model_pipeline_from_features",
+        fake_create_model_pipeline_from_features,
+    )
+    monkeypatch.setattr(backtester_module, "train_model", fake_train_model)
+    monkeypatch.setattr(backtester_module, "predict_model", fake_predict_model)
+
+    summary = WalkForwardBacktester(initial_train_days=1, test_days=1).backtest(
+        make_hourly_traffic(48),
+        target_columns=["congestion_score", "travel_time_mins"],
+    )
+
+    assert summary["target_columns"] == ["congestion_score", "travel_time_mins"]
+    assert set(summary["model_metrics"]) == {"congestion_score", "travel_time_mins"}
+    assert set(summary["baseline_metrics"]) == {"congestion_score", "travel_time_mins"}
+    assert set(summary["comparison"]) == {"congestion_score", "travel_time_mins"}
+
+    first_fold = summary["fold_results"][0]
+    assert list(first_fold["predictions"].columns) == [
+        "congestion_score",
+        "travel_time_mins",
+    ]
+    assert list(first_fold["baseline_predictions"].columns) == [
+        "congestion_score",
+        "travel_time_mins",
+    ]
+    assert first_fold["baseline_predictions"].iloc[0]["congestion_score"] == pytest.approx(
+        make_hourly_traffic(48)
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+        .loc[23, "congestion_score"]
+    )
+    assert "improvement" in summary["comparison"]["congestion_score"]["mae"]
+    assert "improvement_pct" in summary["comparison"]["travel_time_mins"]["rmse"]
 
 
 def test_backtest_rejects_data_shorter_than_train_plus_test_window():
