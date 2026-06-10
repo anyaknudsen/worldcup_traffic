@@ -7,14 +7,14 @@ import numpy as np
 import pandas as pd
 
 from model import (
-    DEFAULT_TARGET_COLUMNS,
-    compare_metrics,
-    create_feature_engineering_pipeline,
+    create_train_test_feature_sets,
     create_model_pipeline_from_features,
     evaluate_predictions_by_target,
     get_feature_importances,
     predict_naive_last_value,
     predict_model,
+    select_forecast_features,
+    sort_time_series,
     train_model,
 )
 
@@ -69,12 +69,7 @@ class WalkForwardBacktester:
         Returns:
             Dictionary containing fold results and summary metrics.
         """
-        target_columns = self._resolve_target_columns(target_column, target_columns)
-
-        data = data.copy()
-        if not pd.api.types.is_datetime64_any_dtype(data[timestamp_column]):
-            data[timestamp_column] = pd.to_datetime(data[timestamp_column])
-        data = data.sort_values(timestamp_column).reset_index(drop=True)
+        data = sort_time_series(data, timestamp_column=timestamp_column)
 
         initial_train_hours = self.initial_train_days * 24
         test_hours = self.test_days * 24
@@ -94,19 +89,24 @@ class WalkForwardBacktester:
             logger.info("--- Fold %s ---", fold)
 
             combined_end_idx = end_train_idx + test_hours
-            combined_data = data.iloc[:combined_end_idx].copy()
+            train_data = data.iloc[:end_train_idx].reset_index(drop=True)
+            test_data = data.iloc[end_train_idx:combined_end_idx].reset_index(drop=True)
             logger.info(
-                "Combined data period: %s to %s",
-                combined_data[timestamp_column].iloc[0],
-                combined_data[timestamp_column].iloc[-1],
+                "Train/test data period: %s to %s",
+                train_data[timestamp_column].iloc[0],
+                test_data[timestamp_column].iloc[-1],
             )
 
-            fe_pipeline = create_feature_engineering_pipeline()
-            featured_data = fe_pipeline.fit_transform(combined_data)
-            logger.info("Featured data shape: %s", featured_data.shape)
-
-            train_featured = featured_data.iloc[:end_train_idx]
-            test_featured = featured_data.iloc[end_train_idx:combined_end_idx]
+            train_featured, test_featured = create_train_test_feature_sets(
+                train_data,
+                test_data,
+                timestamp_column=timestamp_column,
+            )
+            logger.info(
+                "Featured train/test shapes: %s / %s",
+                train_featured.shape,
+                test_featured.shape,
+            )
 
             logger.info(
                 "Training period: %s to %s",
@@ -124,50 +124,22 @@ class WalkForwardBacktester:
                 len(test_featured),
             )
 
-            exclude_cols = [timestamp_column]
-            if "location_id" in train_featured.columns:
-                exclude_cols.append("location_id")
-            exclude_cols.extend(
-                [target for target in target_columns if target in train_featured.columns]
+            X_train = select_forecast_features(
+                train_featured,
+                target_column=target_column,
+                timestamp_column=timestamp_column,
             )
-
-            X_train = train_featured.drop(columns=exclude_cols)
-            X_test = test_featured.drop(columns=exclude_cols)
-            y_test = test_featured[target_columns]
-
-            predictions = pd.DataFrame(index=test_featured.index)
-            feature_importances = {}
-
-            for target in target_columns:
-                model_pipeline = create_model_pipeline_from_features(self.model_type)
-                trained_pipeline = train_model(
-                    model_pipeline,
-                    X_train,
-                    train_featured[target],
-                )
-                predictions[target] = np.asarray(
-                    predict_model(trained_pipeline, X_test)
-                )
-                feature_importances[target] = get_feature_importances(
-                    trained_pipeline,
-                    X_train.columns,
-                )
-
-            baseline_predictions = predict_naive_last_value(
-                train_featured[target_columns],
-                y_test,
+            y_train = train_featured[target_column]
+            X_test = select_forecast_features(
+                test_featured,
+                target_column=target_column,
+                timestamp_column=timestamp_column,
             )
-            metrics = evaluate_predictions_by_target(
-                y_test.values,
-                predictions.values,
-                target_columns,
-            )
-            baseline_metrics = evaluate_predictions_by_target(
-                y_test.values,
-                baseline_predictions.values,
-                target_columns,
-            )
-            comparison = compare_metrics(metrics, baseline_metrics)
+            y_test = test_featured[target_column]
+
+            model_pipeline = create_model_pipeline_from_features(self.model_type)
+            trained_pipeline = train_model(model_pipeline, X_train, y_train)
+            y_pred = predict_model(trained_pipeline, X_test)
 
             logger.info(
                 "Fold %s - %s MAE: %.2f (baseline %.2f), RMSE: %.2f (baseline %.2f)",

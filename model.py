@@ -15,11 +15,42 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 
-DEFAULT_TARGET_COLUMNS = ["congestion_score", "travel_time_mins"]
+DEFAULT_LAG_COLUMNS = ["congestion_score", "travel_time_mins"]
+DEFAULT_LAG_HOURS = [1, 24]
+DEFAULT_UNAVAILABLE_AT_PREDICTION_COLUMNS = [
+    "congestion_score",
+    "travel_time_mins",
+    "speed_kph",
+    "incident_count",
+]
+
+
+def _coerce_datetime(series):
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series
+
+    try:
+        converted = pd.to_datetime(series)
+    except (TypeError, ValueError):
+        return pd.to_datetime(series, utc=True)
+
+    if pd.api.types.is_datetime64_any_dtype(converted):
+        return converted
+    return pd.to_datetime(series, utc=True)
+
+
+def sort_time_series(data, timestamp_column="timestamp"):
+    """Return data sorted chronologically with a datetimelike timestamp column."""
+    data = data.copy()
+    data[timestamp_column] = _coerce_datetime(data[timestamp_column])
+    return data.sort_values(timestamp_column, kind="mergesort").reset_index(drop=True)
 
 
 class TimeFeatureEngineer(BaseEstimator, TransformerMixin):
     """Create time-based features from a ``timestamp`` column."""
+
+    def __init__(self, timestamp_column="timestamp"):
+        self.timestamp_column = timestamp_column
 
     def fit(self, X, y=None):
         return self
@@ -36,11 +67,10 @@ class TimeFeatureEngineer(BaseEstimator, TransformerMixin):
         """
         X = X.copy()
 
-        if not pd.api.types.is_datetime64_any_dtype(X["timestamp"]):
-            X["timestamp"] = pd.to_datetime(X["timestamp"])
+        X[self.timestamp_column] = _coerce_datetime(X[self.timestamp_column])
 
-        X["hour"] = X["timestamp"].dt.hour
-        X["day_of_week"] = X["timestamp"].dt.dayofweek
+        X["hour"] = X[self.timestamp_column].dt.hour
+        X["day_of_week"] = X[self.timestamp_column].dt.dayofweek
         X["is_weekend"] = (X["day_of_week"] >= 5).astype(int)
         X["hour_sin"] = np.sin(2 * np.pi * X["hour"] / 24)
         X["hour_cos"] = np.cos(2 * np.pi * X["hour"] / 24)
@@ -53,7 +83,13 @@ class TimeFeatureEngineer(BaseEstimator, TransformerMixin):
 class LagFeatureEngineer(BaseEstimator, TransformerMixin):
     """Create lag features for time series data."""
 
-    def __init__(self, lag_columns=None, lag_hours=None):
+    def __init__(
+        self,
+        lag_columns=None,
+        lag_hours=None,
+        timestamp_column="timestamp",
+        group_columns=None,
+    ):
         """
         Initialize the LagFeatureEngineer.
 
@@ -65,9 +101,18 @@ class LagFeatureEngineer(BaseEstimator, TransformerMixin):
         """
         self.lag_columns = lag_columns
         self.lag_hours = lag_hours
+        self.timestamp_column = timestamp_column
+        self.group_columns = group_columns
 
     def fit(self, X, y=None):
+        history = self._prepare_timestamps(X)
+        self.group_columns_ = self._resolve_group_columns(history)
+        self.history_ = history.copy()
         return self
+
+    def fit_transform(self, X, y=None, **fit_params):
+        self.fit(X, y)
+        return self._add_lags(self._prepare_timestamps(X))
 
     def transform(self, X):
         """
@@ -79,19 +124,80 @@ class LagFeatureEngineer(BaseEstimator, TransformerMixin):
         Returns:
             pd.DataFrame: Data with additional lag features.
         """
+        X = self._prepare_timestamps(X)
+
+        if not hasattr(self, "history_"):
+            return self._add_lags(X)
+
+        current_for_lags = X.copy()
+        original_values = {}
+        for col in self._lag_columns():
+            if col in current_for_lags.columns:
+                original_values[col] = current_for_lags[col].copy()
+                current_for_lags[col] = np.nan
+
+        history = self.history_.copy()
+        combined = pd.concat([history, current_for_lags], ignore_index=True, sort=False)
+        featured = self._add_lags(combined)
+        current = featured.iloc[len(history) :].reset_index(drop=True)
+
+        for col, values in original_values.items():
+            current[col] = values.reset_index(drop=True)
+
+        return current
+
+    def _prepare_timestamps(self, X):
         X = X.copy()
+        if self.timestamp_column in X.columns:
+            X[self.timestamp_column] = _coerce_datetime(X[self.timestamp_column])
+        return X
 
-        if "timestamp" in X.columns:
-            X = X.sort_values("timestamp").reset_index(drop=True)
+    def _lag_columns(self):
+        return self.lag_columns or DEFAULT_LAG_COLUMNS
 
-        lag_columns = self.lag_columns or ["congestion_score", "travel_time_mins"]
-        lag_hours = self.lag_hours or [1, 24]
+    def _lag_hours(self):
+        return self.lag_hours or DEFAULT_LAG_HOURS
 
-        for col in lag_columns:
+    def _resolve_group_columns(self, X):
+        if self.group_columns is not None:
+            return [col for col in self.group_columns if col in X.columns]
+        if "location_id" in X.columns:
+            return ["location_id"]
+        return []
+
+    def _add_lags(self, X):
+        X = X.copy()
+        if self.timestamp_column not in X.columns:
+            return self._add_lags_in_current_order(X)
+
+        row_order_col = "__lag_row_order__"
+        X[row_order_col] = np.arange(len(X))
+        group_columns = getattr(self, "group_columns_", self._resolve_group_columns(X))
+        sort_columns = [*group_columns, self.timestamp_column]
+        sorted_X = X.sort_values(sort_columns, kind="mergesort")
+
+        for col in self._lag_columns():
+            if col in sorted_X.columns:
+                for lag in self._lag_hours():
+                    lag_col = f"{col}_lag_{lag}"
+                    if group_columns:
+                        sorted_X[lag_col] = sorted_X.groupby(
+                            group_columns, sort=False
+                        )[col].shift(lag)
+                    else:
+                        sorted_X[lag_col] = sorted_X[col].shift(lag)
+
+        return (
+            sorted_X.sort_values(row_order_col, kind="mergesort")
+            .drop(columns=[row_order_col])
+            .reset_index(drop=True)
+        )
+
+    def _add_lags_in_current_order(self, X):
+        for col in self._lag_columns():
             if col in X.columns:
-                for lag in lag_hours:
+                for lag in self._lag_hours():
                     X[f"{col}_lag_{lag}"] = X[col].shift(lag)
-
         return X
 
 
@@ -102,9 +208,17 @@ class NumericFeatureSelector(BaseEstimator, TransformerMixin):
         self.drop_columns = drop_columns or []
 
     def fit(self, X, y=None):
+        X_numeric = self._numeric_features(X)
+        self.feature_columns_ = list(X_numeric.columns)
         return self
 
     def transform(self, X):
+        X_numeric = self._numeric_features(X)
+        if hasattr(self, "feature_columns_"):
+            X_numeric = X_numeric.reindex(columns=self.feature_columns_)
+        return X_numeric
+
+    def _numeric_features(self, X):
         X = X.copy()
         X = X.drop(columns=[col for col in self.drop_columns if col in X], errors="ignore")
         return X.select_dtypes(include=[np.number])
@@ -132,7 +246,14 @@ def _create_regressor(model_type="random_forest"):
     raise ValueError(f"Unsupported model type: {model_type}")
 
 
-def create_feature_engineering_pipeline():
+def _create_median_imputer():
+    try:
+        return SimpleImputer(strategy="median", keep_empty_features=True)
+    except TypeError:
+        return SimpleImputer(strategy="median")
+
+
+def create_feature_engineering_pipeline(timestamp_column="timestamp"):
     """
     Create a pipeline for feature engineering only.
 
@@ -141,10 +262,43 @@ def create_feature_engineering_pipeline():
     """
     return Pipeline(
         steps=[
-            ("time_features", TimeFeatureEngineer()),
-            ("lag_features", LagFeatureEngineer()),
+            ("time_features", TimeFeatureEngineer(timestamp_column=timestamp_column)),
+            ("lag_features", LagFeatureEngineer(timestamp_column=timestamp_column)),
         ]
     )
+
+
+def create_train_test_feature_sets(
+    train_data,
+    test_data,
+    timestamp_column="timestamp",
+):
+    """Create train/test features without using test-period lag source values."""
+    feature_pipeline = create_feature_engineering_pipeline(
+        timestamp_column=timestamp_column
+    )
+    train_featured = feature_pipeline.fit_transform(train_data)
+    test_featured = feature_pipeline.transform(test_data)
+    return train_featured.reset_index(drop=True), test_featured.reset_index(drop=True)
+
+
+def select_forecast_features(
+    featured_data,
+    target_column="congestion_score",
+    timestamp_column="timestamp",
+    unavailable_columns=None,
+):
+    """Drop columns that are not known at forecast time."""
+    if unavailable_columns is None:
+        unavailable_columns = DEFAULT_UNAVAILABLE_AT_PREDICTION_COLUMNS
+
+    drop_columns = [
+        timestamp_column,
+        "location_id",
+        target_column,
+        *unavailable_columns,
+    ]
+    return featured_data.drop(columns=list(dict.fromkeys(drop_columns)), errors="ignore")
 
 
 def create_model_pipeline_from_features(model_type="random_forest"):
@@ -161,14 +315,18 @@ def create_model_pipeline_from_features(model_type="random_forest"):
     return Pipeline(
         steps=[
             ("feature_selector", NumericFeatureSelector()),
-            ("imputer", SimpleImputer(strategy="median")),
+            ("imputer", _create_median_imputer()),
             ("scaler", StandardScaler()),
             ("regressor", _create_regressor(model_type)),
         ]
     )
 
 
-def create_model_pipeline(model_type="random_forest", target_column="congestion_score"):
+def create_model_pipeline(
+    model_type="random_forest",
+    target_column="congestion_score",
+    timestamp_column="timestamp",
+):
     """
     Create a machine learning pipeline for raw traffic data.
 
@@ -177,13 +335,20 @@ def create_model_pipeline(model_type="random_forest", target_column="congestion_
     """
     return Pipeline(
         steps=[
-            ("time_features", TimeFeatureEngineer()),
-            ("lag_features", LagFeatureEngineer()),
+            ("time_features", TimeFeatureEngineer(timestamp_column=timestamp_column)),
+            ("lag_features", LagFeatureEngineer(timestamp_column=timestamp_column)),
             (
                 "feature_selector",
-                NumericFeatureSelector(["timestamp", "location_id", target_column]),
+                NumericFeatureSelector(
+                    [
+                        timestamp_column,
+                        "location_id",
+                        target_column,
+                        *DEFAULT_UNAVAILABLE_AT_PREDICTION_COLUMNS,
+                    ]
+                ),
             ),
-            ("imputer", SimpleImputer(strategy="median")),
+            ("imputer", _create_median_imputer()),
             ("scaler", StandardScaler()),
             ("regressor", _create_regressor(model_type)),
         ]
