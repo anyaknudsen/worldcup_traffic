@@ -172,22 +172,3 @@ class WalkForwardBacktester:
             logger.info("  First 3 folds avg MAE: %.2f", first_avg)
             logger.info("  Last 3 folds avg MAE:  %.2f", last_avg)
 
-
-def run_backtest_example():
-    """Run a demonstration backtest with generated mock data."""
-    from traffic_client import TrafficAPIClient
-
-    client = TrafficAPIClient()
-    location = {"lat": 25.4850, "lng": 51.4475}
-    end_time = pd.Timestamp.now()
-    start_time = end_time - pd.Timedelta(days=90)
-    data = client.fetch_traffic_data(location, start_time, end_time)
-
-    backtester = WalkForwardBacktester(
-        initial_train_days=30,
-        test_days=7,
-        model_type="random_forest",
-    )
-    summary = backtester.backtest(data, target_column="congestion_score")
-    backtester.print_summary(summary)
-    return summary

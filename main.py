@@ -62,6 +62,12 @@ def run_backtesting(data, initial_train_days=30, test_days=7):
     return summary
 
 
+def run_backtest_example():
+    """Run a demonstration backtest with generated mock data."""
+    data = fetch_data({"lat": 25.4850, "lng": 51.4475}, days=90)
+    return run_backtesting(data, initial_train_days=30, test_days=7)
+
+
 def save_results(data, predictions=None, actuals=None, filename="traffic_predictions.csv"):
     """Save raw data, optionally with aligned prediction columns."""
     data_copy = data.copy()
