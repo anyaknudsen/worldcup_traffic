@@ -9,10 +9,12 @@ import numpy as np
 
 from backtester import WalkForwardBacktester
 from model import (
-    create_feature_engineering_pipeline,
+    create_train_test_feature_sets,
     create_model_pipeline_from_features,
     evaluate_predictions,
     predict_model,
+    select_forecast_features,
+    sort_time_series,
     train_model,
 )
 from traffic_client import TrafficAPIClient
@@ -63,24 +65,23 @@ def run_simple_prediction(data, target_column="congestion_score"):
 
     logger.info("Running simple train/test split prediction...")
 
-    feature_pipeline = create_feature_engineering_pipeline()
-    featured_data = feature_pipeline.fit_transform(data)
+    data = sort_time_series(data)
 
-    exclude_cols = ["timestamp"]
-    if "location_id" in featured_data.columns:
-        exclude_cols.append("location_id")
-    if target_column in featured_data.columns:
-        exclude_cols.append(target_column)
-
-    X = featured_data.drop(columns=exclude_cols)
-    y = featured_data[target_column]
-
-    split_idx = int(len(X) * 0.8)
-    if split_idx == 0 or split_idx == len(X):
+    split_idx = int(len(data) * 0.8)
+    if split_idx == 0 or split_idx == len(data):
         raise ValueError("Train/test split would be empty; provide more data.")
 
-    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+    train_data = data.iloc[:split_idx].reset_index(drop=True)
+    test_data = data.iloc[split_idx:].reset_index(drop=True)
+    train_featured, test_featured = create_train_test_feature_sets(
+        train_data,
+        test_data,
+    )
+
+    X_train = select_forecast_features(train_featured, target_column=target_column)
+    X_test = select_forecast_features(test_featured, target_column=target_column)
+    y_train = train_featured[target_column]
+    y_test = test_featured[target_column]
 
     logger.info("Training samples: %s, Test samples: %s", len(X_train), len(X_test))
 

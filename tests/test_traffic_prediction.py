@@ -64,7 +64,7 @@ def test_time_feature_engineering_adds_expected_time_columns():
     assert transformed.loc[0, "day_of_week_cos"] == pytest.approx(1.0)
 
 
-def test_lag_feature_engineering_sorts_by_timestamp_and_adds_lags():
+def test_lag_feature_engineering_preserves_order_and_adds_chronological_lags():
     df = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(
@@ -79,12 +79,12 @@ def test_lag_feature_engineering_sorts_by_timestamp_and_adds_lags():
         lag_hours=[1, 2],
     ).fit_transform(df)
 
-    assert transformed["congestion_score"].tolist() == [10, 20, 30]
-    assert np.isnan(transformed.loc[0, "congestion_score_lag_1"])
-    assert transformed.loc[1, "congestion_score_lag_1"] == 10
-    assert transformed.loc[2, "congestion_score_lag_1"] == 20
-    assert np.isnan(transformed.loc[1, "congestion_score_lag_2"])
-    assert transformed.loc[2, "congestion_score_lag_2"] == 10
+    assert transformed["congestion_score"].tolist() == [30, 10, 20]
+    assert transformed.loc[0, "congestion_score_lag_1"] == 20
+    assert np.isnan(transformed.loc[1, "congestion_score_lag_1"])
+    assert transformed.loc[2, "congestion_score_lag_1"] == 10
+    assert transformed.loc[0, "congestion_score_lag_2"] == 10
+    assert np.isnan(transformed.loc[2, "congestion_score_lag_2"])
 
 
 def test_simple_train_predict_flow_returns_predictions_and_metrics():
@@ -97,6 +97,22 @@ def test_simple_train_predict_flow_returns_predictions_and_metrics():
     assert result["metrics"]["rmse"] >= 0
     assert len(result["predictions"]) == len(result["actuals"]) == 12
     assert np.isfinite(result["predictions"]).all()
+
+
+def test_simple_prediction_does_not_use_test_targets_as_lag_features():
+    data = synthetic_traffic_data(periods=50)
+    data.loc[40:, "congestion_score"] = np.arange(1000.0, 1010.0)
+    data.loc[40:, "travel_time_mins"] = 20 + data.loc[40:, "congestion_score"] * 0.8
+
+    result = run_simple_prediction(data)
+    X_test = result["X_test"]
+    test_targets = set(result["actuals"])
+    feature_values = set(pd.Series(X_test.to_numpy().ravel()).dropna())
+
+    assert not test_targets.intersection(feature_values)
+    assert "congestion_score" not in X_test.columns
+    assert "travel_time_mins" not in X_test.columns
+    assert "speed_kph" not in X_test.columns
 
 
 def test_backtesting_runs_on_small_synthetic_dataset():
