@@ -16,6 +16,15 @@ def test_time_feature_engineer_adds_expected_time_features_without_mutating_inpu
     transformed = TimeFeatureEngineer().fit_transform(source)
 
     assert "hour" not in source.columns
+    assert {
+        "hour",
+        "day_of_week",
+        "is_weekend",
+        "hour_sin",
+        "hour_cos",
+        "day_of_week_sin",
+        "day_of_week_cos",
+    }.issubset(transformed.columns)
     assert transformed.loc[0, "hour"] == 6
     assert transformed.loc[0, "day_of_week"] == 5
     assert transformed.loc[0, "is_weekend"] == 1
@@ -25,27 +34,30 @@ def test_time_feature_engineer_adds_expected_time_features_without_mutating_inpu
     assert np.isclose(transformed.loc[0, "day_of_week_cos"], np.cos(2 * np.pi * 5 / 7))
 
 
-def test_lag_feature_engineer_sorts_by_timestamp_and_adds_lags():
+def test_lag_feature_engineer_adds_one_and_twenty_four_hour_lags_chronologically():
+    timestamps = pd.date_range("2026-01-01 00:00:00", periods=26, freq="h")
     source = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(
-                ["2026-01-01 02:00", "2026-01-01 00:00", "2026-01-01 01:00"]
-            ),
-            "congestion_score": [30.0, 10.0, 20.0],
+            "timestamp": timestamps,
+            "congestion_score": np.arange(26, dtype=float),
         }
-    )
+    ).sample(frac=1, random_state=42)
 
     transformed = LagFeatureEngineer(
-        lag_columns=["congestion_score"], lag_hours=[1, 2]
+        lag_columns=["congestion_score"], lag_hours=[1, 24]
     ).fit_transform(source)
 
-    assert transformed["timestamp"].tolist() == sorted(source["timestamp"].tolist())
-    assert transformed["congestion_score"].tolist() == [10.0, 20.0, 30.0]
+    assert transformed["timestamp"].tolist() == timestamps.tolist()
+    assert transformed["congestion_score"].tolist() == list(np.arange(26, dtype=float))
+    assert {"congestion_score_lag_1", "congestion_score_lag_24"}.issubset(
+        transformed.columns
+    )
     assert np.isnan(transformed.loc[0, "congestion_score_lag_1"])
-    assert transformed.loc[1, "congestion_score_lag_1"] == 10.0
-    assert transformed.loc[2, "congestion_score_lag_1"] == 20.0
-    assert np.isnan(transformed.loc[1, "congestion_score_lag_2"])
-    assert transformed.loc[2, "congestion_score_lag_2"] == 10.0
+    assert transformed.loc[1, "congestion_score_lag_1"] == 0.0
+    assert transformed.loc[25, "congestion_score_lag_1"] == 24.0
+    assert transformed.loc[:23, "congestion_score_lag_24"].isna().all()
+    assert transformed.loc[24, "congestion_score_lag_24"] == 0.0
+    assert transformed.loc[25, "congestion_score_lag_24"] == 1.0
 
 
 def test_evaluate_predictions_returns_mae_and_rmse():

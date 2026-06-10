@@ -31,9 +31,25 @@ def test_mock_fetch_generates_expected_schema_and_ranges(monkeypatch):
     assert data["timestamp"].tolist() == list(pd.date_range(start_time, end_time, freq="h"))
     assert set(data["location_id"]) == {"lat_25.485_lng_51.4475"}
     assert data["congestion_score"].between(0, 100).all()
+    assert data["travel_time_mins"].between(20, 100).all()
     assert data["speed_kph"].between(20, 60).all()
     assert set(data["incident_count"].unique()).issubset({0, 1})
-    assert np.allclose(data["travel_time_mins"], 20 + data["congestion_score"] * 0.8)
+
+
+def test_mock_speed_and_travel_time_move_plausibly_with_congestion(monkeypatch):
+    monkeypatch.delenv("TRAFFIC_API_KEY", raising=False)
+    np.random.seed(123)
+    client = TrafficAPIClient()
+
+    start_time = datetime(2026, 1, 1, 0, 0)
+    end_time = datetime(2026, 1, 14, 23, 0)
+    data = client.fetch_traffic_data({"city": "Doha", "country": "QA"}, start_time, end_time)
+
+    ordered = data.sort_values("congestion_score")
+    assert ordered["travel_time_mins"].is_monotonic_increasing
+    assert ordered["speed_kph"].is_monotonic_decreasing
+    assert data["congestion_score"].corr(data["travel_time_mins"]) > 0.9
+    assert data["congestion_score"].corr(data["speed_kph"]) < -0.9
 
 
 def test_fetch_multiple_locations_is_keyed_by_generated_location_id(monkeypatch):
