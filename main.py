@@ -103,7 +103,7 @@ def run_simple_prediction(data, target_column="congestion_score"):
     }
 
 
-def run_backtesting(data, initial_train_days=30, test_days=7):
+def run_backtesting(data, initial_train_days=30, test_days=7, target_columns=None):
     """
     Run expanding-window walk-forward backtesting.
 
@@ -111,6 +111,7 @@ def run_backtesting(data, initial_train_days=30, test_days=7):
         data (pd.DataFrame): Input data.
         initial_train_days (int): Initial training window in days.
         test_days (int): Testing window in days.
+        target_columns (list): Target columns to predict.
 
     Returns:
         dict: Backtesting summary.
@@ -118,13 +119,15 @@ def run_backtesting(data, initial_train_days=30, test_days=7):
     logger.info("\nRunning expanding window walk-forward backtesting...")
     logger.info("Initial training window: %s days", initial_train_days)
     logger.info("Testing window: %s days", test_days)
+    target_columns = target_columns or DEFAULT_TARGET_COLUMNS
+    logger.info("Targets: %s", ", ".join(target_columns))
 
     backtester = WalkForwardBacktester(
         initial_train_days=initial_train_days,
         test_days=test_days,
         model_type="random_forest",
     )
-    summary = backtester.backtest(data, target_column="congestion_score")
+    summary = backtester.backtest(data, target_columns=target_columns)
     backtester.print_summary(summary)
     return summary
 
@@ -177,10 +180,17 @@ def main():
         "--mode",
         type=str,
         choices=["simple", "backtest", "both"],
-        default="both",
+        default="backtest",
+        help="Evaluation mode. Defaults to walk-forward backtesting.",
     )
     parser.add_argument("--initial-train", type=int, default=30)
     parser.add_argument("--test-window", type=int, default=7)
+    parser.add_argument(
+        "--targets",
+        type=str,
+        default=",".join(DEFAULT_TARGET_COLUMNS),
+        help="Comma-separated targets for walk-forward backtesting.",
+    )
     parser.add_argument("--save", action="store_true")
 
     args = parser.parse_args()
@@ -197,6 +207,9 @@ def main():
 
     try:
         data = fetch_data(location, days=args.days)
+        target_columns = [
+            target.strip() for target in args.targets.split(",") if target.strip()
+        ]
 
         if args.mode in ["simple", "both"]:
             simple_results = run_simple_prediction(data)
@@ -215,6 +228,7 @@ def main():
                 data,
                 initial_train_days=args.initial_train,
                 test_days=args.test_window,
+                target_columns=target_columns,
             )
             if args.save:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -9,6 +9,7 @@ from model import (
     create_model_pipeline,
     create_model_pipeline_from_features,
     evaluate_predictions,
+    predict_naive_last_value,
 )
 
 
@@ -67,6 +68,29 @@ def test_evaluate_predictions_returns_mae_and_rmse():
 
     assert metrics["mae"] == pytest.approx(5 / 3)
     assert metrics["rmse"] == pytest.approx(np.sqrt(13 / 3))
+
+
+def test_naive_last_value_uses_most_recent_available_value():
+    train = pd.DataFrame({"congestion_score": [10.0, 20.0]})
+    test = pd.DataFrame({"congestion_score": [25.0, 35.0, 40.0]})
+
+    predictions = predict_naive_last_value(train, test)
+
+    assert predictions["congestion_score"].tolist() == [20.0, 25.0, 35.0]
+
+
+def test_compare_metrics_reports_model_vs_baseline_improvement():
+    model_metrics = {"congestion_score": {"mae": 2.0, "rmse": 3.0}}
+    baseline_metrics = {"congestion_score": {"mae": 5.0, "rmse": 4.0}}
+
+    comparison = compare_metrics(model_metrics, baseline_metrics)
+
+    mae_comparison = comparison["congestion_score"]["mae"]
+    assert mae_comparison["model"] == 2.0
+    assert mae_comparison["baseline"] == 5.0
+    assert mae_comparison["improvement"] == 3.0
+    assert mae_comparison["improvement_pct"] == pytest.approx(60.0)
+    assert mae_comparison["model_better"] is True
 
 
 def test_create_model_pipeline_from_features_rejects_unknown_model_type():

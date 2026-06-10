@@ -376,6 +376,29 @@ def predict_model(pipeline, X):
     return pipeline.predict(X)
 
 
+def predict_naive_last_value(train_values, test_values):
+    """
+    Predict each test point with the most recent available actual value.
+
+    The first test prediction uses the final training value. Later test
+    predictions use the previous test actual, matching a one-step-ahead
+    persistence baseline in walk-forward evaluation.
+    """
+    train_values = pd.DataFrame(train_values).reset_index(drop=True)
+    test_values = pd.DataFrame(test_values).reset_index(drop=True)
+
+    if train_values.empty:
+        raise ValueError("Need at least one training row for naive baseline.")
+    if test_values.empty:
+        return test_values.copy()
+
+    first_prediction = train_values.iloc[[-1]].reset_index(drop=True)
+    previous_test_values = test_values.iloc[:-1].reset_index(drop=True)
+    predictions = pd.concat([first_prediction, previous_test_values], ignore_index=True)
+    predictions.columns = test_values.columns
+    return predictions
+
+
 def evaluate_predictions(y_true, y_pred):
     """
     Evaluate predictions using MAE and RMSE.
@@ -383,6 +406,64 @@ def evaluate_predictions(y_true, y_pred):
     Returns:
         dict: Dictionary containing ``mae`` and ``rmse``.
     """
-    mae = mean_absolute_error(y_true, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    mae = float(mean_absolute_error(y_true, y_pred))
+    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
     return {"mae": mae, "rmse": rmse}
+
+
+def evaluate_predictions_by_target(y_true, y_pred, target_columns):
+    """Evaluate predictions separately for each target column."""
+    y_true = pd.DataFrame(y_true, columns=target_columns)
+    y_pred = pd.DataFrame(y_pred, columns=target_columns)
+    return {
+        target: evaluate_predictions(y_true[target].values, y_pred[target].values)
+        for target in target_columns
+    }
+
+
+def compare_metrics(model_metrics, baseline_metrics):
+    """Compare model metrics against the naive baseline for each target."""
+    comparison = {}
+    for target, metrics in model_metrics.items():
+        target_comparison = {}
+        for metric_name, model_value in metrics.items():
+            baseline_value = baseline_metrics[target][metric_name]
+            improvement = baseline_value - model_value
+            if baseline_value == 0:
+                improvement_pct = 0.0 if improvement == 0 else np.nan
+            else:
+                improvement_pct = improvement / baseline_value * 100
+            target_comparison[metric_name] = {
+                "model": float(model_value),
+                "baseline": float(baseline_value),
+                "improvement": float(improvement),
+                "improvement_pct": float(improvement_pct),
+                "model_better": bool(model_value < baseline_value),
+            }
+        comparison[target] = target_comparison
+    return comparison
+
+
+def get_feature_importances(pipeline, feature_names, top_n=10):
+    """
+    Return sorted feature importances for tree models that expose them.
+
+    Non-tree estimators, or estimators without ``feature_importances_``, return
+    an empty list so callers can print this only when it is available.
+    """
+    named_steps = getattr(pipeline, "named_steps", {})
+    regressor = named_steps.get("regressor")
+    importances = getattr(regressor, "feature_importances_", None)
+    if importances is None:
+        return []
+
+    feature_names = list(feature_names)
+    ranked = sorted(
+        zip(feature_names, importances),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    return [
+        {"feature": feature, "importance": float(importance)}
+        for feature, importance in ranked[:top_n]
+    ]
