@@ -73,12 +73,21 @@ def test_fetch_multiple_locations_is_keyed_by_generated_location_id(monkeypatch)
     assert all(len(frame) == 2 for frame in result.values())
 
 
-def test_default_constructor_uses_configured_tomtom_key(monkeypatch):
+def test_default_constructor_uses_mock_without_environment_key(monkeypatch):
     monkeypatch.delenv("TRAFFIC_API_KEY", raising=False)
 
     client = TrafficAPIClient()
 
     assert client.api_key == DEFAULT_TRAFFIC_API_KEY
+    assert client.use_mock is True
+
+
+def test_default_constructor_reads_environment_key(monkeypatch):
+    monkeypatch.setenv("TRAFFIC_API_KEY", "env-key")
+
+    client = TrafficAPIClient()
+
+    assert client.api_key == "env-key"
     assert client.use_mock is False
 
 
