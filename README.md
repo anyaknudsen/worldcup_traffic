@@ -63,6 +63,9 @@ python main.py --save
 
 ## Notes
 
-When no `TRAFFIC_API_KEY` environment variable is set, the project uses mock
-traffic data. Live API access is intentionally not implemented; no external
-credentials or APIs are required to run the project or its tests.
+By default, `TrafficAPIClient` uses the configured TomTom key to fetch a live
+traffic snapshot. You can override it with the `TRAFFIC_API_KEY` environment
+variable, or pass `api_key=""` to `TrafficAPIClient` to use mock traffic data.
+Live TomTom data is current-state data, so the client repeats that snapshot
+across the requested hourly timestamps for compatibility with the prediction
+pipeline.

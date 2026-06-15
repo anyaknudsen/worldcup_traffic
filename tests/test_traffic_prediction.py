@@ -27,7 +27,7 @@ def synthetic_traffic_data(periods=72):
 
 def test_mock_traffic_generation_returns_expected_columns_and_ranges():
     np.random.seed(42)
-    client = TrafficAPIClient()
+    client = TrafficAPIClient(api_key="")
 
     df = client.fetch_traffic_data(
         {"city": "Doha", "country": "QA"},

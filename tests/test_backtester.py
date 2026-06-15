@@ -155,7 +155,7 @@ def test_backtest_produces_fold_on_ninety_days_of_hourly_mock_data(monkeypatch):
 
     start_time = pd.Timestamp("2026-01-01 00:00:00")
     end_time = start_time + pd.Timedelta(hours=90 * 24 - 1)
-    data = TrafficAPIClient().fetch_traffic_data(
+    data = TrafficAPIClient(api_key="").fetch_traffic_data(
         {"city": "Doha", "country": "QA"},
         start_time,
         end_time,
