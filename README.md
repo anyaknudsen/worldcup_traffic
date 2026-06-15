@@ -63,9 +63,9 @@ python main.py --save
 
 ## Notes
 
-By default, `TrafficAPIClient` reads `TRAFFIC_API_KEY` from the environment to
-fetch a live TomTom traffic snapshot. When no key is set, or when
-`TrafficAPIClient(api_key="")` is used, the client falls back to mock traffic
-data. Live TomTom data is current-state data, so the client repeats that
-snapshot across the requested hourly timestamps for compatibility with the
-prediction pipeline.
+By default, `TrafficAPIClient` uses the configured TomTom key to fetch a live
+traffic snapshot. You can override it with the `TRAFFIC_API_KEY` environment
+variable, or pass `api_key=""` to `TrafficAPIClient` to use mock traffic data.
+Live TomTom data is current-state data, so the client repeats that snapshot
+across the requested hourly timestamps for compatibility with the prediction
+pipeline.

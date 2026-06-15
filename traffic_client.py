@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_TRAFFIC_API_KEY = None
+DEFAULT_TRAFFIC_API_KEY = "jqEBfegxUXu6zwI1jdY8J03mZjxrDgV5"
 TOMTOM_TRAFFIC_BASE_URL = "https://api.tomtom.com/traffic/services"
 TOMTOM_INCIDENT_FIELDS = (
     "{incidents{type,geometry{type,coordinates},properties{id,iconCategory}}}"
@@ -38,13 +38,13 @@ class TrafficAPIClient:
         Initialize the TrafficAPIClient.
 
         Args:
-            api_key (str, optional): API key for the traffic service. Defaults
-                to ``os.getenv("TRAFFIC_API_KEY")``. Pass an empty string to
-                force mock data.
+            api_key (str, optional): API key for the traffic service. Defaults to
+                ``os.getenv("TRAFFIC_API_KEY", DEFAULT_TRAFFIC_API_KEY)``. Pass
+                an empty string to force mock data.
             request_timeout (int, optional): HTTP request timeout in seconds.
         """
         self.api_key = (
-            os.getenv("TRAFFIC_API_KEY")
+            os.getenv("TRAFFIC_API_KEY", DEFAULT_TRAFFIC_API_KEY)
             if api_key is None
             else api_key
         )
