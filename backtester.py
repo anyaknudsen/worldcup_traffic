@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 
 from model import (
+    DEFAULT_TARGET_COLUMNS,
+    compare_metrics,
     create_train_test_feature_sets,
     create_model_pipeline_from_features,
     evaluate_predictions_by_target,
@@ -70,6 +72,8 @@ class WalkForwardBacktester:
             Dictionary containing fold results and summary metrics.
         """
         data = sort_time_series(data, timestamp_column=timestamp_column)
+        target_columns = self._resolve_target_columns(target_column, target_columns)
+        primary_target = target_columns[0]
 
         initial_train_hours = self.initial_train_days * 24
         test_hours = self.test_days * 24
@@ -124,34 +128,57 @@ class WalkForwardBacktester:
                 len(test_featured),
             )
 
-            X_train = select_forecast_features(
-                train_featured,
-                target_column=target_column,
-                timestamp_column=timestamp_column,
-            )
-            y_train = train_featured[target_column]
-            X_test = select_forecast_features(
-                test_featured,
-                target_column=target_column,
-                timestamp_column=timestamp_column,
-            )
-            y_test = test_featured[target_column]
+            y_test = test_featured[target_columns]
+            predictions = pd.DataFrame(index=test_featured.index)
+            feature_importances = {}
 
-            model_pipeline = create_model_pipeline_from_features(self.model_type)
-            trained_pipeline = train_model(model_pipeline, X_train, y_train)
-            y_pred = predict_model(trained_pipeline, X_test)
+            for target in target_columns:
+                X_train = select_forecast_features(
+                    train_featured,
+                    target_column=target,
+                    timestamp_column=timestamp_column,
+                )
+                y_train = train_featured[target]
+                X_test = select_forecast_features(
+                    test_featured,
+                    target_column=target,
+                    timestamp_column=timestamp_column,
+                )
+
+                model_pipeline = create_model_pipeline_from_features(self.model_type)
+                trained_pipeline = train_model(model_pipeline, X_train, y_train)
+                predictions[target] = predict_model(trained_pipeline, X_test)
+                feature_importances[target] = get_feature_importances(
+                    trained_pipeline,
+                    X_train.columns,
+                )
+
+            baseline_predictions = predict_naive_last_value(
+                train_featured[target_columns],
+                test_featured[target_columns],
+            )
+            metrics = evaluate_predictions_by_target(
+                y_test,
+                predictions,
+                target_columns,
+            )
+            baseline_metrics = evaluate_predictions_by_target(
+                y_test,
+                baseline_predictions,
+                target_columns,
+            )
+            comparison = compare_metrics(metrics, baseline_metrics)
 
             logger.info(
                 "Fold %s - %s MAE: %.2f (baseline %.2f), RMSE: %.2f (baseline %.2f)",
                 fold,
-                target_columns[0],
-                metrics[target_columns[0]]["mae"],
-                baseline_metrics[target_columns[0]]["mae"],
-                metrics[target_columns[0]]["rmse"],
-                baseline_metrics[target_columns[0]]["rmse"],
+                primary_target,
+                metrics[primary_target]["mae"],
+                baseline_metrics[primary_target]["mae"],
+                metrics[primary_target]["rmse"],
+                baseline_metrics[primary_target]["rmse"],
             )
 
-            primary_target = target_columns[0]
             fold_result = {
                 "fold": fold,
                 "target_columns": target_columns,

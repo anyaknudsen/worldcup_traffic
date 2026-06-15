@@ -6,6 +6,7 @@ from model import (
     LagFeatureEngineer,
     NumericFeatureSelector,
     TimeFeatureEngineer,
+    compare_metrics,
     create_model_pipeline,
     create_model_pipeline_from_features,
     evaluate_predictions,
@@ -37,7 +38,7 @@ def test_time_feature_engineer_adds_expected_time_features_without_mutating_inpu
     assert np.isclose(transformed.loc[0, "day_of_week_cos"], np.cos(2 * np.pi * 5 / 7))
 
 
-def test_lag_feature_engineer_adds_one_and_twenty_four_hour_lags_chronologically():
+def test_lag_feature_engineer_preserves_order_and_adds_chronological_lags():
     timestamps = pd.date_range("2026-01-01 00:00:00", periods=26, freq="h")
     source = pd.DataFrame(
         {
@@ -50,17 +51,30 @@ def test_lag_feature_engineer_adds_one_and_twenty_four_hour_lags_chronologically
         lag_columns=["congestion_score"], lag_hours=[1, 24]
     ).fit_transform(source)
 
-    assert transformed["timestamp"].tolist() == timestamps.tolist()
-    assert transformed["congestion_score"].tolist() == list(np.arange(26, dtype=float))
+    chronological_source = source.sort_values("timestamp").reset_index(drop=True)
+    expected_by_timestamp = {
+        row.timestamp: {
+            "lag_1": np.nan if idx < 1 else float(idx - 1),
+            "lag_24": np.nan if idx < 24 else float(idx - 24),
+        }
+        for idx, row in chronological_source.iterrows()
+    }
+
+    assert transformed["timestamp"].tolist() == source["timestamp"].tolist()
+    assert transformed["congestion_score"].tolist() == source["congestion_score"].tolist()
     assert {"congestion_score_lag_1", "congestion_score_lag_24"}.issubset(
         transformed.columns
     )
-    assert np.isnan(transformed.loc[0, "congestion_score_lag_1"])
-    assert transformed.loc[1, "congestion_score_lag_1"] == 0.0
-    assert transformed.loc[25, "congestion_score_lag_1"] == 24.0
-    assert transformed.loc[:23, "congestion_score_lag_24"].isna().all()
-    assert transformed.loc[24, "congestion_score_lag_24"] == 0.0
-    assert transformed.loc[25, "congestion_score_lag_24"] == 1.0
+    for row in transformed.itertuples():
+        expected = expected_by_timestamp[row.timestamp]
+        if np.isnan(expected["lag_1"]):
+            assert np.isnan(row.congestion_score_lag_1)
+        else:
+            assert row.congestion_score_lag_1 == expected["lag_1"]
+        if np.isnan(expected["lag_24"]):
+            assert np.isnan(row.congestion_score_lag_24)
+        else:
+            assert row.congestion_score_lag_24 == expected["lag_24"]
 
 
 def test_evaluate_predictions_returns_mae_and_rmse():

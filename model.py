@@ -17,6 +17,12 @@ from sklearn.preprocessing import StandardScaler
 
 DEFAULT_LAG_COLUMNS = ["congestion_score", "travel_time_mins"]
 DEFAULT_LAG_HOURS = [1, 24]
+DEFAULT_TARGET_COLUMNS = [
+    "congestion_score",
+    "travel_time_mins",
+    "speed_kph",
+    "incident_count",
+]
 DEFAULT_UNAVAILABLE_AT_PREDICTION_COLUMNS = [
     "congestion_score",
     "travel_time_mins",

@@ -9,6 +9,7 @@ import numpy as np
 
 from backtester import WalkForwardBacktester
 from model import (
+    DEFAULT_TARGET_COLUMNS,
     create_train_test_feature_sets,
     create_model_pipeline_from_features,
     evaluate_predictions,

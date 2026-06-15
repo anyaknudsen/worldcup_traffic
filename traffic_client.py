@@ -5,8 +5,12 @@ When no live API key is available, the client generates mock traffic data for
 demonstration and tests.
 """
 
+import json
 import logging
 import os
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 import numpy as np
 import pandas as pd
@@ -18,19 +22,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+DEFAULT_TRAFFIC_API_KEY = "jqEBfegxUXu6zwI1jdY8J03mZjxrDgV5"
+TOMTOM_TRAFFIC_BASE_URL = "https://api.tomtom.com/traffic/services"
+TOMTOM_INCIDENT_FIELDS = (
+    "{incidents{type,geometry{type,coordinates},properties{id,iconCategory}}}"
+)
+DEFAULT_INCIDENT_RADIUS_DEGREES = 0.01
+
 
 class TrafficAPIClient:
     """Fetch traffic data or generate mock data when no API key is provided."""
 
-    def __init__(self, api_key=None):
+    def __init__(self, api_key=None, request_timeout=10):
         """
         Initialize the TrafficAPIClient.
 
         Args:
-            api_key (str, optional): API key for the traffic service. Defaults
-                to ``os.getenv("TRAFFIC_API_KEY")``.
+            api_key (str, optional): API key for the traffic service. Defaults to
+                ``os.getenv("TRAFFIC_API_KEY", DEFAULT_TRAFFIC_API_KEY)``. Pass
+                an empty string to force mock data.
+            request_timeout (int, optional): HTTP request timeout in seconds.
         """
-        self.api_key = api_key or os.getenv("TRAFFIC_API_KEY")
+        self.api_key = (
+            os.getenv("TRAFFIC_API_KEY", DEFAULT_TRAFFIC_API_KEY)
+            if api_key is None
+            else api_key
+        )
+        self.request_timeout = request_timeout
         self.use_mock = not self.api_key
         if self.use_mock:
             logger.warning("No API key provided. Using mock data generator.")
@@ -53,9 +71,124 @@ class TrafficAPIClient:
         if self.use_mock:
             return self._generate_mock_traffic_data(location, start_time, end_time)
 
-        raise NotImplementedError(
-            "Live API not implemented. Unset TRAFFIC_API_KEY to use mock data."
+        snapshot = self._fetch_live_traffic_snapshot(location)
+        return self._snapshot_to_time_series(snapshot, location, start_time, end_time)
+
+    def _fetch_live_traffic_snapshot(self, location):
+        """
+        Fetch one live TomTom snapshot for a location.
+
+        TomTom's Flow Segment Data and Incident Details endpoints return current
+        traffic conditions, not historical hourly records. The public
+        ``fetch_traffic_data`` method preserves this project's time-series shape
+        by repeating this snapshot across the requested hourly timestamps.
+        """
+        lat, lng = self._coordinates(location)
+        flow_data = self._fetch_flow_segment_data(lat, lng)
+        incident_count = self._fetch_incident_count(location, lat, lng)
+
+        current_speed = self._required_number(flow_data, "currentSpeed")
+        free_flow_speed = self._required_number(flow_data, "freeFlowSpeed")
+        current_travel_time = self._required_number(flow_data, "currentTravelTime")
+
+        return {
+            "congestion_score": self._calculate_congestion_score(
+                current_speed,
+                free_flow_speed,
+            ),
+            "travel_time_mins": current_travel_time / 60,
+            "speed_kph": current_speed,
+            "incident_count": incident_count,
+        }
+
+    def _fetch_flow_segment_data(self, lat, lng):
+        response = self._tomtom_get_json(
+            "/4/flowSegmentData/absolute/10/json",
+            {
+                "point": f"{lat},{lng}",
+                "unit": "KMPH",
+            },
         )
+        flow_data = response.get("flowSegmentData")
+        if not isinstance(flow_data, dict):
+            raise ValueError("TomTom Flow Segment Data response missing flowSegmentData")
+        return flow_data
+
+    def _fetch_incident_count(self, location, lat, lng):
+        response = self._tomtom_get_json(
+            "/5/incidentDetails",
+            {
+                "bbox": self._incident_bbox(location, lat, lng),
+                "fields": TOMTOM_INCIDENT_FIELDS,
+                "language": "en-GB",
+                "timeValidityFilter": "present",
+            },
+        )
+        incidents = response.get("incidents", [])
+        if not isinstance(incidents, list):
+            raise ValueError("TomTom Incidents response contains invalid incidents data")
+        return len(incidents)
+
+    def _tomtom_get_json(self, path, params):
+        params = {**params, "key": self.api_key}
+        url = f"{TOMTOM_TRAFFIC_BASE_URL}{path}?{urlencode(params, safe=',{}')}"
+        try:
+            with urlopen(url, timeout=self.request_timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            raise RuntimeError(
+                f"TomTom request failed with HTTP status {exc.code} for {path}"
+            ) from exc
+        except URLError as exc:
+            raise RuntimeError(f"TomTom request failed for {path}: {exc.reason}") from exc
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"TomTom response was not valid JSON for {path}") from exc
+
+    def _snapshot_to_time_series(self, snapshot, location, start_time, end_time):
+        timestamps = pd.date_range(start=start_time, end=end_time, freq="h")
+        location_id = self._location_id(location)
+
+        return pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "location_id": location_id,
+                "congestion_score": snapshot["congestion_score"],
+                "travel_time_mins": snapshot["travel_time_mins"],
+                "speed_kph": snapshot["speed_kph"],
+                "incident_count": snapshot["incident_count"],
+            }
+        )
+
+    def _coordinates(self, location):
+        if "lat" not in location or "lng" not in location:
+            raise ValueError(
+                "Live TomTom traffic data requires lat and lng in location."
+            )
+        return float(location["lat"]), float(location["lng"])
+
+    def _incident_bbox(self, location, lat, lng):
+        if "bbox" in location:
+            return location["bbox"]
+
+        radius = float(
+            location.get("incident_radius_degrees", DEFAULT_INCIDENT_RADIUS_DEGREES)
+        )
+        bounds = (lng - radius, lat - radius, lng + radius, lat + radius)
+        return ",".join(
+            f"{coordinate:.6f}".rstrip("0").rstrip(".") for coordinate in bounds
+        )
+
+    def _required_number(self, data, field):
+        value = data.get(field)
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"TomTom Flow Segment Data response missing numeric {field}")
+        return value
+
+    def _calculate_congestion_score(self, current_speed, free_flow_speed):
+        if free_flow_speed <= 0:
+            raise ValueError("TomTom freeFlowSpeed must be greater than zero")
+        congestion_score = 100 * (1 - current_speed / free_flow_speed)
+        return float(np.clip(congestion_score, 0, 100))
 
     def _location_id(self, location):
         if "lat" in location and "lng" in location:
