@@ -173,7 +173,10 @@ class TrafficAPIClient:
         radius = float(
             location.get("incident_radius_degrees", DEFAULT_INCIDENT_RADIUS_DEGREES)
         )
-        return f"{lng - radius},{lat - radius},{lng + radius},{lat + radius}"
+        bounds = (lng - radius, lat - radius, lng + radius, lat + radius)
+        return ",".join(
+            f"{coordinate:.6f}".rstrip("0").rstrip(".") for coordinate in bounds
+        )
 
     def _required_number(self, data, field):
         value = data.get(field)
