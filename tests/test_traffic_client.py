@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 import traffic_client
-from traffic_client import DEFAULT_TRAFFIC_API_KEY, TrafficAPIClient
+from traffic_client import TrafficAPIClient
 
 
 EXPECTED_COLUMNS = [
